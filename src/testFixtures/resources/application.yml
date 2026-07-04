@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: redis-sse
+  data:
+    redis:
+      host: localhost
+      password: redispass
+      port: 6379
+      repositories:
+        enabled: false
+redis-sse:
+  stream-key-prefix: app:sse-events
+  read-count: 100
+  block-timeout-in-seconds: 10
+  retry-in-seconds: 3
+  heartbeat-interval-in-seconds: 15
