@@ -143,10 +143,11 @@ Clients can then connect to:
 
 ```text
 GET /sse/orders
+GET /sse/orders?replayLimit=0
 GET /sse/orders?replayLimit=10
 ```
 
-`replayLimit` replays the last N messages from the Redis stream before continuing with live messages. It must be greater than zero when provided.
+`replayLimit` replays the last N messages from the Redis stream before continuing with live messages. Pass `0` to skip fetching previous messages and receive only new stream events. It must be greater than or equal to zero when provided.
 
 ## Event Completion
 

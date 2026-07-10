@@ -55,13 +55,19 @@ class RedisEventSubscriber(
     replayLimit: Int?
   ): Flow<ServerSentEvent<String>> =
     channelFlow {
-      var lastId = ReadOffset.from("0-0")
+      val replayCount = replayLimit?.let(::validateReplayLimit)
+      var lastId =
+        if (replayCount == 0) {
+          ReadOffset.latest()
+        } else {
+          ReadOffset.from("0-0")
+        }
 
       val streams = factory.reactiveConnection.streamCommands()
       val streamKey = RedisStreamUtils.toBytes("${sseProperties.streamKeyPrefix}:$channel")
 
-      if (replayLimit != null) {
-        for (record in fetchLastMessages(channel, replayLimit)) {
+      if (replayCount != null && replayCount > 0) {
+        for (record in fetchLastMessages(channel, replayCount)) {
           val sr = record.toStreamRecord()
           lastId = ReadOffset.from(sr.id)
           send(toSse(sr.id, sr.type, sr.payload))
@@ -91,18 +97,17 @@ class RedisEventSubscriber(
     limit: Int
   ): List<ByteBufferRecord> {
     val streamKey = RedisStreamUtils.toBytes("${sseProperties.streamKeyPrefix}:$channel")
-    val count = validateReplayLimit(limit)
 
     return factory.reactiveConnection
       .streamCommands()
-      .xRevRange(streamKey, Range.unbounded(), Limit.limit().count(count))
+      .xRevRange(streamKey, Range.unbounded(), Limit.limit().count(limit))
       .collectList()
       .awaitSingle()
       .reversed()
   }
 
   private fun validateReplayLimit(limit: Int): Int {
-    require(limit > 0) { "replayLimit must be greater than zero" }
+    require(limit >= 0) { "replayLimit must be greater than or equal to zero" }
     require(limit <= Int.MAX_VALUE) { "replayLimit must be less than or equal to ${Int.MAX_VALUE}" }
 
     return limit

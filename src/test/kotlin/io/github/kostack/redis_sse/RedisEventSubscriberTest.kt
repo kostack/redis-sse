@@ -103,17 +103,43 @@ class RedisEventSubscriberTest {
     }
 
   @Test
-  fun `rejects non positive replay limit`() =
+  fun `zero replay limit skips replay and reads only new events`() =
     runTest {
+      val capturedReadCommands = mutableListOf<ReadCommand>()
       every { factory.reactiveConnection } returns connection
       every { connection.streamCommands() } returns streamCommands
+      every { streamCommands.read(any<Publisher<ReadCommand>>()) } answers {
+        val command = Flux.from(firstArg<Publisher<ReadCommand>>()).blockFirst()!!
+        capturedReadCommands += command
 
+        Flux.just(
+          CommandResponse(
+            command,
+            Flux.just(record("3-0", SseKeys.FINISHED_EVENT, """{"done":true}"""))
+          )
+        )
+      }
+
+      val events = subscriber.subscribe("orders", replayLimit = 0).toList()
+      val streamOffset = capturedReadCommands.single().streamOffsets.single()
+
+      assertThat(events).hasSize(1)
+      assertThat(events.single().id()).isEqualTo("3-0")
+      assertThat(streamOffset.offset.offset).isEqualTo("$")
+      verify(exactly = 0) {
+        streamCommands.xRevRange(any<ByteBuffer>(), any<Range<String>>(), any<Limit>())
+      }
+    }
+
+  @Test
+  fun `rejects negative replay limit`() =
+    runTest {
       val exception =
         assertFailsWith<IllegalArgumentException> {
-          subscriber.subscribe("orders", replayLimit = 0).toList()
+          subscriber.subscribe("orders", replayLimit = -1).toList()
         }
 
-      assertThat(exception).hasMessage("replayLimit must be greater than zero")
+      assertThat(exception).hasMessage("replayLimit must be greater than or equal to zero")
     }
 
   private fun record(
