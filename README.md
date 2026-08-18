@@ -94,7 +94,8 @@ class OrderEvents(
     publisher.publish(
       channel = "orders",
       type = "order-created",
-      payload = mapOf("orderId" to orderId)
+      payload = mapOf("orderId" to orderId),
+      ttl = 3600
     )
   }
 }
@@ -107,6 +108,10 @@ The publisher writes one Redis Stream record containing:
 - `payload`
 
 The `payload` field is a JSON string.
+
+The optional `ttl` argument sets the Redis stream expiration in seconds. Each publish with a TTL
+refreshes the expiration for the entire channel stream. When `ttl` is omitted or `null`, the
+publisher does not set an expiration.
 
 ## Subscribing To Events
 
