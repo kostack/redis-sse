@@ -5,6 +5,7 @@ import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
 import org.springframework.data.redis.connection.stream.RecordId
 import tools.jackson.databind.ObjectMapper
 import java.nio.ByteBuffer
+import java.time.Duration
 
 class RedisEventPublisher(
   private val factory: ReactiveRedisConnectionFactory,
@@ -14,7 +15,8 @@ class RedisEventPublisher(
   suspend fun publish(
     channel: String,
     type: String,
-    payload: Map<String, Any>
+    payload: Map<String, Any>,
+    ttl: Long? = null
   ) {
     val streamKey = "${properties.streamKeyPrefix}:$channel"
 
@@ -25,11 +27,21 @@ class RedisEventPublisher(
         bytes(SseKeys.RECORD_FIELD_PAYLOAD) to bytes(objectMapper.writeValueAsString(payload))
       )
 
-    factory.reactiveConnection
+    val connection = factory.reactiveConnection
+    val streamKeyBytes = bytes(streamKey)
+
+    connection
       .streamCommands()
-      .xAdd(bytes(streamKey), body)
+      .xAdd(streamKeyBytes, body)
       .map(RecordId::getValue)
       .awaitSingle()
+
+    if (ttl != null) {
+      connection
+        .keyCommands()
+        .expire(streamKeyBytes, Duration.ofSeconds(ttl))
+        .awaitSingle()
+    }
   }
 
   private fun bytes(value: String): ByteBuffer = RedisStreamUtils.toBytes(value)

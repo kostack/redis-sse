@@ -6,6 +6,7 @@ import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import org.springframework.data.redis.connection.ReactiveKeyCommands
 import org.springframework.data.redis.connection.ReactiveRedisConnection
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
 import org.springframework.data.redis.connection.ReactiveStreamCommands
@@ -13,11 +14,13 @@ import org.springframework.data.redis.connection.stream.RecordId
 import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import java.nio.ByteBuffer
+import java.time.Duration
 
 class RedisEventPublisherTest {
   private val factory = mockk<ReactiveRedisConnectionFactory>()
   private val connection = mockk<ReactiveRedisConnection>()
   private val streamCommands = mockk<ReactiveStreamCommands>()
+  private val keyCommands = mockk<ReactiveKeyCommands>()
   private val objectMapper = mockk<ObjectMapper>()
   private val properties = SseProperties(streamKeyPrefix = "test:sse-events")
 
@@ -51,6 +54,29 @@ class RedisEventPublisherTest {
 
       verify(exactly = 1) { objectMapper.writeValueAsString(payload) }
       verify(exactly = 1) { streamCommands.xAdd(any<ByteBuffer>(), any<Map<ByteBuffer, ByteBuffer>>()) }
+    }
+
+  @Test
+  fun `expires stream when ttl is provided`() =
+    runTest {
+      val payload = mapOf<String, Any>("message" to "hello")
+
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      every { connection.keyCommands() } returns keyCommands
+      every { objectMapper.writeValueAsString(payload) } returns """{"message":"hello"}"""
+      every { streamCommands.xAdd(any<ByteBuffer>(), any<Map<ByteBuffer, ByteBuffer>>()) } returns
+        Mono.just(RecordId.of("1700000000000-0"))
+      every { keyCommands.expire(any(), Duration.ofSeconds(60)) } returns Mono.just(true)
+
+      publisher.publish("orders", "created", payload, ttl = 60)
+
+      verify(exactly = 1) {
+        keyCommands.expire(
+          match { it.asString() == "test:sse-events:orders" },
+          Duration.ofSeconds(60)
+        )
+      }
     }
 
   private fun Map<ByteBuffer, ByteBuffer>.asStringMap(): Map<String, String> =
