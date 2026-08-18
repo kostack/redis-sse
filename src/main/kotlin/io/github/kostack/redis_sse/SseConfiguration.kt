@@ -8,6 +8,7 @@ import org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoCo
 import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
+import org.springframework.data.redis.core.ReactiveRedisTemplate
 import tools.jackson.databind.ObjectMapper
 
 @AutoConfiguration(after = [DataRedisReactiveAutoConfiguration::class, JacksonAutoConfiguration::class])
@@ -28,4 +29,10 @@ class SseConfiguration {
     factory: ReactiveRedisConnectionFactory,
     properties: SseProperties
   ): RedisEventSubscriber = RedisEventSubscriber(factory, properties)
+
+  @Bean
+  fun redisPurger(
+    template: ReactiveRedisTemplate<String, String>,
+    properties: SseProperties
+  ): RedisPurger = RedisPurger(template, properties)
 }

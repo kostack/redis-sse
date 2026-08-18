@@ -2,10 +2,11 @@
 
 Redis SSE is a Spring Boot auto-configuration library for publishing server-sent event payloads through Redis Streams and exposing them as Kotlin `Flow<ServerSentEvent<String>>`.
 
-The package provides two beans when a reactive Redis connection factory is available:
+The package provides the following components when a reactive Redis connection factory is available:
 
 - `RedisEventPublisher`
 - `RedisEventSubscriber`
+- `RedisPurger`
 
 ## Requirements
 
@@ -148,6 +149,26 @@ GET /sse/orders?replayLimit=10
 ```
 
 `replayLimit` replays the last N messages from the Redis stream before continuing with live messages. Pass `0` to skip fetching previous messages and receive only new stream events. It must be greater than or equal to zero when provided.
+
+## Purging Events
+
+Inject `RedisPurger` to delete all events stored for a channel:
+
+```kotlin
+import io.github.kostack.redis_sse.RedisPurger
+import org.springframework.stereotype.Service
+
+@Service
+class OrderEventCleanup(
+  private val purger: RedisPurger
+) {
+  suspend fun purgeOrders() {
+    purger.purge(channel = "orders")
+  }
+}
+```
+
+The purger deletes the Redis stream at `prefix:channel`. With the default configuration, purging the `orders` channel deletes `app:sse-events:orders`. This permanently removes all retained events for that channel; active subscribers can continue waiting for newly published events.
 
 ## Event Completion
 

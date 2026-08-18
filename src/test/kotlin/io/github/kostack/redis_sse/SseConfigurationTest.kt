@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
+import org.springframework.data.redis.core.ReactiveRedisTemplate
 import tools.jackson.databind.ObjectMapper
 
 class SseConfigurationTest {
@@ -18,6 +19,7 @@ class SseConfigurationTest {
     contextRunner.run { context ->
       assertThat(context).doesNotHaveBean(RedisEventPublisher::class.java)
       assertThat(context).doesNotHaveBean(RedisEventSubscriber::class.java)
+      assertThat(context).doesNotHaveBean(RedisPurger::class.java)
       assertThat(context).doesNotHaveBean(SseProperties::class.java)
     }
   }
@@ -31,10 +33,14 @@ class SseConfigurationTest {
       ).withBean(
         ObjectMapper::class.java,
         { mockk(relaxed = true) }
+      ).withBean(
+        ReactiveRedisTemplate::class.java,
+        { mockk<ReactiveRedisTemplate<String, String>>(relaxed = true) }
       ).run { context ->
         assertThat(context).hasSingleBean(SseProperties::class.java)
         assertThat(context).hasSingleBean(RedisEventPublisher::class.java)
         assertThat(context).hasSingleBean(RedisEventSubscriber::class.java)
+        assertThat(context).hasSingleBean(RedisPurger::class.java)
       }
   }
 }
