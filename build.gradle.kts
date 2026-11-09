@@ -3,6 +3,7 @@ import org.gradle.testing.jacoco.tasks.JacocoReport
 
 plugins {
   kotlin("jvm") version "2.3.0"
+  kotlin("kapt") version "2.3.0"
   kotlin("plugin.spring") version "2.3.0"
   id("org.springframework.boot") version "4.1.0"
   id("io.spring.dependency-management") version "1.1.7"
@@ -33,6 +34,8 @@ dependencyManagement {
 }
 
 dependencies {
+  kapt("org.springframework.boot:spring-boot-configuration-processor")
+
   // API
   api("org.springframework.boot:spring-boot-starter-webflux")
   api("org.springframework.boot:spring-boot-starter-data-redis-reactive")
@@ -124,9 +127,7 @@ tasks.named<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
 }
 
 tasks.named("check") {
-  dependsOn(tasks.named("jacocoTestCoverageVerification"))
-  dependsOn(tasks.named("spotlessCheck"))
-  dependsOn(tasks.named("test"))
+  dependsOn("spotlessCheck", "jacocoTestReport", "jacocoTestCoverageVerification")
 }
 
 tasks.named("bootJar") {
