@@ -10,7 +10,7 @@ The package provides the following components when a reactive Redis connection f
 
 ## Requirements
 
-- Java 23
+- Java 25
 - Spring Boot 4.1
 - Redis 5.0 or newer (Redis Streams)
 - Reactive Redis configured through Spring Boot
@@ -18,11 +18,20 @@ The package provides the following components when a reactive Redis connection f
 
 ## Installation
 
+Redis SSE does not bring Spring Boot, Spring Data Redis, WebFlux or the Kotlin coroutines libraries
+with it. They are compile-only dependencies, so the application's own Spring Boot version decides
+which versions are used. Declare them next to the library:
+
 Gradle Kotlin DSL:
 
 ```kotlin
 dependencies {
   implementation("io.github.kostack:redis-sse:<version>")
+  implementation("org.springframework.boot:spring-boot-starter-webflux")
+  implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
+  implementation("org.jetbrains.kotlin:kotlin-reflect")
 }
 ```
 
@@ -31,6 +40,11 @@ Gradle Groovy DSL:
 ```groovy
 dependencies {
   implementation 'io.github.kostack:redis-sse:<version>'
+  implementation 'org.springframework.boot:spring-boot-starter-webflux'
+  implementation 'org.springframework.boot:spring-boot-starter-data-redis-reactive'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-reactor'
+  implementation 'org.jetbrains.kotlin:kotlin-reflect'
 }
 ```
 
@@ -42,11 +56,46 @@ Maven:
   <artifactId>redis-sse</artifactId>
   <version>VERSION</version>
 </dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-webflux</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.jetbrains.kotlinx</groupId>
+  <artifactId>kotlinx-coroutines-core</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.jetbrains.kotlinx</groupId>
+  <artifactId>kotlinx-coroutines-reactor</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.jetbrains.kotlin</groupId>
+  <artifactId>kotlin-reflect</artifactId>
+</dependency>
+```
+
+The versions are managed by the Spring Boot BOM (the Spring Boot Gradle plugin or
+`spring-boot-starter-parent`), so none of these need an explicit version.
+
+### JDK native access warning
+
+On JDK 24 and newer, Netty, which is used by the reactive Redis client and WebFlux, loads native
+libraries and the JVM prints `WARNING: A restricted method in java.lang.System has been called`.
+Start the application with the following JVM option to allow it and remove the warning:
+
+```text
+--enable-native-access=ALL-UNNAMED
 ```
 
 ## Configuration
 
 The package is registered through Spring Boot auto-configuration. No `@Enable...` annotation is required in the consuming application.
+
+Each component backs off when the application defines its own bean of the same type, so any of them can be replaced. `RedisEventPublisher` is only created when Jackson's `ObjectMapper` bean is available.
 
 Configure Redis as usual:
 
@@ -116,7 +165,7 @@ The publisher writes one Redis Stream record containing:
 - `type`
 - `payload`
 
-The `payload` field is a JSON string. `publish` returns the Redis record id of the new event.
+The `payload` field is a JSON string. `payload` is optional and defaults to an empty map. `publish` returns the Redis record id of the new event.
 
 The optional `ttl` argument (a `kotlin.time.Duration`, at least 1 millisecond) sets the expiration
 of the entire channel stream. Each publish with a TTL refreshes that expiration. When `ttl` is
@@ -214,14 +263,23 @@ Publishing an event with type `finished` ends the subscriber flow for that chann
 ```kotlin
 publisher.publish(
   channel = "orders",
-  type = "finished",
-  payload = emptyMap()
+  type = SseKeys.FINISHED_EVENT
 )
 ```
+
+`SseKeys.FINISHED_EVENT` is the constant for `finished` (`import io.github.kostack.redis_sse.SseKeys`).
 
 Heartbeat events are emitted with type `heartbeat` and empty data while the stream remains open.
 
 ## Upgrading
+
+Upgrading to the release that targets Java 25:
+
+- Java 25 is required.
+- Spring Boot, Spring Data Redis, WebFlux, the Kotlin coroutines libraries and `kotlin-reflect` are no
+  longer published as dependencies of `redis-sse`. Add them to the application as shown in
+  [Installation](#installation).
+- The test fixtures jar is no longer published.
 
 Upgrading from versions before atomic publishing:
 
@@ -229,7 +287,8 @@ Upgrading from versions before atomic publishing:
   seconds. Replace `ttl = 3600` with `ttl = 1.hours` (`import kotlin.time.Duration.Companion.hours`).
 - `publish` now returns the Redis record id as a `String`. Existing callers that ignore the result
   keep compiling.
-- `payload` accepts `Map<String, Any?>`, so null values are allowed.
+- `payload` accepts `Map<String, Any?>`, so null values are allowed. It is optional and defaults to
+  an empty map.
 - `RedisEventSubscriber.subscribe` has a new optional `lastEventId` parameter. Existing calls keep
   working.
 

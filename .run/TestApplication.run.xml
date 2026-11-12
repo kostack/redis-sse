@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="TestApplication" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="redis-sse.testFixtures" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="io.github.kostack.redis_sse.TestApplication" />
+    <option name="VM_PARAMETERS" value="--enable-native-access=ALL-UNNAMED" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

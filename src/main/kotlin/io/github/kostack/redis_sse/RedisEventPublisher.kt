@@ -18,7 +18,7 @@ class RedisEventPublisher(
   suspend fun publish(
     channel: String,
     type: String,
-    payload: Map<String, Any?>,
+    payload: Map<String, Any?> = emptyMap(),
     ttl: Duration? = null
   ): String {
     require(ttl == null || ttl.inWholeMilliseconds > 0) { "ttl must be at least 1 millisecond, was $ttl" }

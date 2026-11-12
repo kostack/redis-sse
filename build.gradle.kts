@@ -1,25 +1,24 @@
-import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
-import org.gradle.testing.jacoco.tasks.JacocoReport
-
 plugins {
-  kotlin("jvm") version "2.3.0"
-  kotlin("kapt") version "2.3.0"
-  kotlin("plugin.spring") version "2.3.0"
-  id("org.springframework.boot") version "4.1.0"
-  id("io.spring.dependency-management") version "1.1.7"
+  kotlin("jvm")
+  kotlin("kapt")
+  kotlin("plugin.spring")
   id("com.vanniktech.maven.publish") version "0.33.0"
   id("java-test-fixtures")
-  id("com.diffplug.spotless") version "8.4.0"
+  id("com.diffplug.spotless") version "8.11.0"
   jacoco
 }
 
+val springBootVersion = "4.1.2"
+val kotlinVersion: String by project
+val packageId = "redis-sse"
+val packageName = "Redis SSE"
 group = "io.github.kostack"
 version = providers.gradleProperty("projectVersion").getOrElse("1.0.0")
 description = "Redis SSE"
 
 java {
   toolchain {
-    languageVersion = JavaLanguageVersion.of(23)
+    languageVersion = JavaLanguageVersion.of(25)
   }
 }
 
@@ -27,48 +26,55 @@ repositories {
   mavenCentral()
 }
 
-dependencyManagement {
-  imports {
-    mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
-  }
-}
-
 dependencies {
+  // Build and tests only: the Spring Boot BOM manages all versions below and is not published.
+  val springBootBom = platform("org.springframework.boot:spring-boot-dependencies:$springBootVersion")
+  kapt(springBootBom)
+  compileOnly(springBootBom)
+  testImplementation(springBootBom)
+  testFixturesImplementation(springBootBom)
+
+  // Generates configuration metadata for @ConfigurationProperties.
   kapt("org.springframework.boot:spring-boot-configuration-processor")
 
-  // API
-  api("org.springframework.boot:spring-boot-starter-webflux")
-  api("org.springframework.boot:spring-boot-starter-data-redis-reactive")
-
-  // Kotlin
-  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
-  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
-  implementation("org.jetbrains.kotlin:kotlin-reflect")
+  // Provided by the consuming application; not published as dependencies.
+  listOf(
+    "org.springframework.boot:spring-boot-starter-webflux",
+    "org.springframework.boot:spring-boot-starter-data-redis-reactive",
+    "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+    "org.jetbrains.kotlinx:kotlinx-coroutines-reactor",
+    "org.jetbrains.kotlin:kotlin-reflect"
+  ).forEach {
+    compileOnly(it)
+    testImplementation(it)
+    testFixturesImplementation(it)
+  }
 
   testImplementation("org.springframework.boot:spring-boot-starter-test")
-  testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+  testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test")
+  testImplementation("io.projectreactor:reactor-test")
   testImplementation("com.ninja-squad:springmockk:5.0.1")
   testImplementation("io.mockk:mockk:1.14.11")
-  testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test")
-  testFixturesImplementation(kotlin("stdlib"))
   testImplementation(kotlin("test"))
-  testImplementation("io.projectreactor:reactor-test")
-
-  testFixturesImplementation("org.springframework.boot:spring-boot-starter-webflux")
-  testFixturesImplementation("org.springframework.boot:spring-boot-autoconfigure")
-  testFixturesImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
-  testFixturesImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
-  testFixturesImplementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
+  testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 kotlin {
   compilerOptions {
-    freeCompilerArgs.addAll("-Xjsr305=strict", "-Xannotation-default-target=param-property")
+    freeCompilerArgs.add("-Xjsr305=strict")
   }
 }
 
-tasks.withType<Test> {
-  useJUnitPlatform()
+// Test fixtures are for this project's tests only; don't publish them.
+(components["java"] as AdhocComponentWithVariants).apply {
+  withVariantsFromConfiguration(configurations["testFixturesApiElements"]) { skip() }
+  withVariantsFromConfiguration(configurations["testFixturesRuntimeElements"]) { skip() }
+}
+// The publish plugin adds the fixtures' sources variant late, so skip it after evaluation.
+afterEvaluate {
+  configurations.findByName("testFixturesSourcesElements")?.let {
+    (components["java"] as AdhocComponentWithVariants).withVariantsFromConfiguration(it) { skip() }
+  }
 }
 
 val installGitHook =
@@ -85,38 +91,37 @@ val installGitHook =
     }
   }
 
-tasks.named("assemble") {
+tasks.assemble {
   dependsOn(installGitHook)
 }
 
-tasks.named<Test>("test") {
+tasks.test {
   useJUnitPlatform()
   dependsOn(installGitHook)
-
-  finalizedBy(tasks.named("jacocoTestReport"))
-  reports.junitXml.required.set(true)
+  finalizedBy(tasks.jacocoTestReport)
+  jvmArgs(
+    // Needed by MockK's inline mocking agent on recent JDKs.
+    "-XX:+EnableDynamicAgentLoading",
+    // Lets Netty load its native transport libraries without JDK restricted-method warnings.
+    "--enable-native-access=ALL-UNNAMED"
+  )
 
   testLogging {
     events("passed", "skipped", "failed")
-    showStandardStreams = true
   }
-  jvmArgs("-XX:+EnableDynamicAgentLoading")
 }
 
-tasks.named<JacocoReport>("jacocoTestReport") {
-  dependsOn(tasks.named("test"))
-
+tasks.jacocoTestReport {
   reports {
-    xml.required.set(true)
-    html.required.set(true)
-    csv.required.set(false)
+    xml.required = true
+    html.required = true
+    csv.required = false
+    html.outputLocation = layout.buildDirectory.dir("jacocoHtml")
+    xml.outputLocation = layout.buildDirectory.file("jacocoReport.xml")
   }
-
-  reports.html.outputLocation.set(layout.buildDirectory.dir("jacocoHtml"))
-  reports.xml.outputLocation.set(layout.buildDirectory.file("jacocoReport.xml"))
 }
 
-tasks.named<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
+tasks.jacocoTestCoverageVerification {
   violationRules {
     rule {
       limit {
@@ -126,16 +131,8 @@ tasks.named<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
   }
 }
 
-tasks.named("check") {
-  dependsOn("spotlessCheck", "jacocoTestReport", "jacocoTestCoverageVerification")
-}
-
-tasks.named("bootJar") {
-  enabled = false
-}
-
-tasks.named("jar") {
-  enabled = true
+tasks.check {
+  dependsOn(tasks.jacocoTestCoverageVerification)
 }
 
 spotless {
@@ -155,34 +152,34 @@ mavenPublishing {
 
   coordinates(
     groupId = group.toString(),
-    artifactId = "redis-sse",
+    artifactId = packageId,
     version = version.toString()
   )
 
   pom {
-    name.set("Redis SSE")
-    description.set(project.description)
-    url.set("https://github.com/kostack/redis-sse")
+    name = packageName
+    description = project.description
+    url = "https://github.com/kostack/$packageId"
 
     licenses {
       license {
-        name.set("MIT License")
-        url.set("https://opensource.org/licenses/MIT")
+        name = "MIT License"
+        url = "https://opensource.org/licenses/MIT"
       }
     }
 
     developers {
       developer {
-        id.set("zender")
-        name.set("Nikolay Georgiev")
-        url.set("https://github.com/zender")
+        id = "zender"
+        name = "Nikolay Georgiev"
+        url = "https://github.com/zender"
       }
     }
 
     scm {
-      connection.set("scm:git:git://github.com/kostack/redis-sse.git")
-      developerConnection.set("scm:git:ssh://github.com/kostack/redis-sse.git")
-      url.set("https://github.com/kostack/redis-sse")
+      connection = "scm:git:git://github.com/kostack/$packageId.git"
+      developerConnection = "scm:git:ssh://github.com/kostack/$packageId.git"
+      url = "https://github.com/kostack/$packageId"
     }
   }
 }

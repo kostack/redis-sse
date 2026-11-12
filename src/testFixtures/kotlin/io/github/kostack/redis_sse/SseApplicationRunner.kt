@@ -10,17 +10,19 @@ import kotlin.time.Duration.Companion.seconds
 
 @Component
 class SseApplicationRunner(
-  private val publisher: RedisEventPublisher
+  private val publisher: RedisEventPublisher,
+  private val purger: RedisPurger
 ) : ApplicationRunner {
   override fun run(args: ApplicationArguments): Unit =
     runBlocking {
-      for (i in 1..10) {
+      purger.purge("test")
+      for (i in 1..100) {
         delay(5.seconds)
         publisher.publish("test", "test", mapOf("key" to "value-$i"))
       }
       delay(5.seconds)
       log.info("Publishing event: finished")
-      // publisher.publish("test", "finished", emptyMap())
+      // publisher.publish("test", SseKeys.FINISHED_EVENT)
     }
 
   companion object {
