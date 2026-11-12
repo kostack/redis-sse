@@ -8,7 +8,7 @@ class RedisPurger(
   private val properties: SseProperties
 ) {
   suspend fun purge(channel: String) {
-    val streamKey = "${properties.streamKeyPrefix}:$channel"
+    val streamKey = properties.streamKey(channel)
     template.delete(streamKey).awaitSingleOrNull()
   }
 }

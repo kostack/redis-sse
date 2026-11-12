@@ -5,82 +5,112 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.springframework.data.redis.connection.ReactiveKeyCommands
 import org.springframework.data.redis.connection.ReactiveRedisConnection
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
-import org.springframework.data.redis.connection.ReactiveStreamCommands
-import org.springframework.data.redis.connection.stream.RecordId
+import org.springframework.data.redis.connection.ReactiveScriptingCommands
+import org.springframework.data.redis.connection.ReturnType
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import java.nio.ByteBuffer
-import java.time.Duration
+import kotlin.test.assertFailsWith
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class RedisEventPublisherTest {
   private val factory = mockk<ReactiveRedisConnectionFactory>()
   private val connection = mockk<ReactiveRedisConnection>()
-  private val streamCommands = mockk<ReactiveStreamCommands>()
-  private val keyCommands = mockk<ReactiveKeyCommands>()
+  private val scriptingCommands = mockk<ReactiveScriptingCommands>()
   private val objectMapper = mockk<ObjectMapper>()
   private val properties = SseProperties(streamKeyPrefix = "test:sse-events")
+  private val capturedArgs = mutableListOf<List<String>>()
 
   private val publisher = RedisEventPublisher(factory, objectMapper, properties)
 
+  @BeforeEach
+  fun setUp() {
+    every { factory.reactiveConnection } returns connection
+    every { connection.scriptingCommands() } returns scriptingCommands
+    every { connection.closeLater() } returns Mono.empty()
+    every { objectMapper.writeValueAsString(any()) } returns """{"message":"hello"}"""
+    every {
+      scriptingCommands.eval<Any>(any(), ReturnType.VALUE, 1, *anyVararg())
+    } answers {
+      @Suppress("UNCHECKED_CAST")
+      val keysAndArgs = (args[3] as Array<ByteBuffer>).map { RedisStreamUtils.fromBytes(it) }
+      capturedArgs += keysAndArgs
+      Flux.just(RedisStreamUtils.toBytes("1700000000000-0"))
+    }
+  }
+
   @Test
-  fun `publishes event to configured stream with serialized payload`() =
+  fun `publishes event to configured stream and returns record id`() =
     runTest {
-      val capturedKey = mutableListOf<ByteBuffer>()
-      val capturedBody = mutableListOf<Map<ByteBuffer, ByteBuffer>>()
-      val payload = mapOf<String, Any>("message" to "hello", "count" to 2)
+      val payload = mapOf<String, Any?>("message" to "hello", "missing" to null)
 
-      every { factory.reactiveConnection } returns connection
-      every { connection.streamCommands() } returns streamCommands
-      every { objectMapper.writeValueAsString(payload) } returns """{"message":"hello","count":2}"""
-      every {
-        streamCommands.xAdd(capture(capturedKey), capture(capturedBody))
-      } returns Mono.just(RecordId.of("1700000000000-0"))
+      val id = publisher.publish("orders", "created", payload)
 
-      publisher.publish("orders", "created", payload)
-
-      assertThat(capturedKey.single().asString()).isEqualTo("test:sse-events:orders")
-      assertThat(capturedBody.single().asStringMap())
-        .containsExactlyInAnyOrderEntriesOf(
-          mapOf(
-            SseKeys.RECORD_FIELD_CHANNEL to "orders",
-            SseKeys.RECORD_FIELD_TYPE to "created",
-            SseKeys.RECORD_FIELD_PAYLOAD to """{"message":"hello","count":2}"""
-          )
+      assertThat(id).isEqualTo("1700000000000-0")
+      assertThat(capturedArgs.single())
+        .containsExactly(
+          "test:sse-events:orders",
+          "",
+          "",
+          SseKeys.RECORD_FIELD_CHANNEL,
+          "orders",
+          SseKeys.RECORD_FIELD_TYPE,
+          "created",
+          SseKeys.RECORD_FIELD_PAYLOAD,
+          """{"message":"hello"}"""
         )
-
       verify(exactly = 1) { objectMapper.writeValueAsString(payload) }
-      verify(exactly = 1) { streamCommands.xAdd(any<ByteBuffer>(), any<Map<ByteBuffer, ByteBuffer>>()) }
+      verify(exactly = 1) { connection.closeLater() }
     }
 
   @Test
-  fun `expires stream when ttl is provided`() =
+  fun `passes ttl in milliseconds and max length to the script`() =
     runTest {
-      val payload = mapOf<String, Any>("message" to "hello")
+      val trimmingPublisher =
+        RedisEventPublisher(factory, objectMapper, properties.copy(maxLength = 1000))
 
-      every { factory.reactiveConnection } returns connection
-      every { connection.streamCommands() } returns streamCommands
-      every { connection.keyCommands() } returns keyCommands
-      every { objectMapper.writeValueAsString(payload) } returns """{"message":"hello"}"""
-      every { streamCommands.xAdd(any<ByteBuffer>(), any<Map<ByteBuffer, ByteBuffer>>()) } returns
-        Mono.just(RecordId.of("1700000000000-0"))
-      every { keyCommands.expire(any(), Duration.ofSeconds(60)) } returns Mono.just(true)
+      trimmingPublisher.publish("orders", "created", emptyMap(), ttl = 60.seconds)
 
-      publisher.publish("orders", "created", payload, ttl = 60)
-
-      verify(exactly = 1) {
-        keyCommands.expire(
-          match { it.asString() == "test:sse-events:orders" },
-          Duration.ofSeconds(60)
-        )
-      }
+      assertThat(capturedArgs.single().subList(0, 3))
+        .containsExactly("test:sse-events:orders", "60000", "1000")
     }
 
-  private fun Map<ByteBuffer, ByteBuffer>.asStringMap(): Map<String, String> =
-    entries.associate { (key, value) -> key.asString() to value.asString() }
+  @Test
+  fun `rejects non-positive ttl without touching redis`() =
+    runTest {
+      for (ttl in listOf(Duration.ZERO, (-5).seconds, 0.5.milliseconds)) {
+        assertFailsWith<IllegalArgumentException> {
+          publisher.publish("orders", "created", emptyMap(), ttl = ttl)
+        }
+      }
 
-  private fun ByteBuffer.asString(): String = RedisStreamUtils.fromBytes(this)
+      verify(exactly = 0) { factory.reactiveConnection }
+    }
+
+  @Test
+  fun `rejects blank channel`() =
+    runTest {
+      assertFailsWith<IllegalArgumentException> { publisher.publish(" ", "created", emptyMap()) }
+
+      verify(exactly = 0) { factory.reactiveConnection }
+    }
+
+  @Test
+  fun `closes connection when the script fails`() =
+    runTest {
+      every {
+        scriptingCommands.eval<Any>(any(), ReturnType.VALUE, 1, *anyVararg())
+      } returns Flux.error(IllegalStateException("boom"))
+
+      assertFailsWith<IllegalStateException> { publisher.publish("orders", "created", emptyMap()) }
+
+      verify(exactly = 1) { connection.closeLater() }
+    }
 }

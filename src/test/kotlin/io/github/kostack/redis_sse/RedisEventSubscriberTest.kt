@@ -6,6 +6,7 @@ import io.mockk.verify
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.reactivestreams.Publisher
 import org.springframework.data.domain.Range
@@ -19,6 +20,7 @@ import org.springframework.data.redis.connection.stream.ByteBufferRecord
 import org.springframework.data.redis.connection.stream.RecordId
 import org.springframework.data.redis.connection.stream.StreamRecords
 import reactor.core.publisher.Flux
+import reactor.core.publisher.Mono
 import java.nio.ByteBuffer
 import java.time.Duration
 import kotlin.test.assertFailsWith
@@ -37,6 +39,11 @@ class RedisEventSubscriberTest {
     )
 
   private val subscriber = RedisEventSubscriber(factory, properties)
+
+  @BeforeEach
+  fun setUp() {
+    every { connection.closeLater() } returns Mono.empty()
+  }
 
   @Test
   fun `emits replayed events in chronological order and stops on finished event`() =
@@ -67,6 +74,8 @@ class RedisEventSubscriberTest {
       assertThat(capturedLimit.single().count).isEqualTo(2)
 
       verify(exactly = 0) { streamCommands.read(any<Publisher<ReadCommand>>()) }
+      verify(exactly = 1) { factory.reactiveConnection }
+      verify(exactly = 1) { connection.closeLater() }
     }
 
   @Test

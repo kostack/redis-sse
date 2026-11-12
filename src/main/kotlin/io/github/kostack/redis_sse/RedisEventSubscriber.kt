@@ -1,5 +1,6 @@
 package io.github.kostack.redis_sse
 
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -10,6 +11,8 @@ import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.reactive.asFlow
 import kotlinx.coroutines.reactor.awaitSingle
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.withContext
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Range
@@ -63,48 +66,51 @@ class RedisEventSubscriber(
           ReadOffset.from("0-0")
         }
 
-      val streams = factory.reactiveConnection.streamCommands()
-      val streamKey = RedisStreamUtils.toBytes("${sseProperties.streamKeyPrefix}:$channel")
+      val streamKey = RedisStreamUtils.toBytes(sseProperties.streamKey(channel))
+      val connection = factory.reactiveConnection
 
-      if (replayCount != null && replayCount > 0) {
-        for (record in fetchLastMessages(channel, replayCount)) {
-          val sr = record.toStreamRecord()
-          lastId = ReadOffset.from(sr.id)
-          send(toSse(sr.id, sr.type, sr.payload))
-          if (sr.type == SseKeys.FINISHED_EVENT) return@channelFlow
-        }
-      }
+      try {
+        val streams = connection.streamCommands()
 
-      var finished = false
-      while (!finished) {
-        readBatch(streams, streamKey, lastId)
-          .catch { e ->
-            log.error("Error while reading Redis stream", e)
-          }.map { it.toStreamRecord() }
-          .transformWhile { sr ->
-            emit(sr)
-            sr.type != SseKeys.FINISHED_EVENT
-          }.collect { sr ->
+        if (replayCount != null && replayCount > 0) {
+          for (record in fetchLastMessages(streams, streamKey, replayCount)) {
+            val sr = record.toStreamRecord()
             lastId = ReadOffset.from(sr.id)
             send(toSse(sr.id, sr.type, sr.payload))
-            if (sr.type == SseKeys.FINISHED_EVENT) finished = true
+            if (sr.type == SseKeys.FINISHED_EVENT) return@channelFlow
           }
+        }
+
+        var finished = false
+        while (!finished) {
+          readBatch(streams, streamKey, lastId)
+            .catch { e ->
+              log.error("Error while reading Redis stream", e)
+            }.map { it.toStreamRecord() }
+            .transformWhile { sr ->
+              emit(sr)
+              sr.type != SseKeys.FINISHED_EVENT
+            }.collect { sr ->
+              lastId = ReadOffset.from(sr.id)
+              send(toSse(sr.id, sr.type, sr.payload))
+              if (sr.type == SseKeys.FINISHED_EVENT) finished = true
+            }
+        }
+      } finally {
+        withContext(NonCancellable) { connection.closeLater().awaitSingleOrNull() }
       }
     }
 
   private suspend fun fetchLastMessages(
-    channel: String,
+    streams: ReactiveStreamCommands,
+    streamKey: ByteBuffer,
     limit: Int
-  ): List<ByteBufferRecord> {
-    val streamKey = RedisStreamUtils.toBytes("${sseProperties.streamKeyPrefix}:$channel")
-
-    return factory.reactiveConnection
-      .streamCommands()
+  ): List<ByteBufferRecord> =
+    streams
       .xRevRange(streamKey, Range.unbounded(), Limit.limit().count(limit))
       .collectList()
       .awaitSingle()
       .reversed()
-  }
 
   private fun validateReplayLimit(limit: Int): Int {
     require(limit >= 0) { "replayLimit must be greater than or equal to zero" }

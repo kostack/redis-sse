@@ -1,11 +1,14 @@
 package io.github.kostack.redis_sse
 
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.reactor.awaitSingle
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.withContext
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory
-import org.springframework.data.redis.connection.stream.RecordId
+import org.springframework.data.redis.connection.ReturnType
 import tools.jackson.databind.ObjectMapper
 import java.nio.ByteBuffer
-import java.time.Duration
+import kotlin.time.Duration
 
 class RedisEventPublisher(
   private val factory: ReactiveRedisConnectionFactory,
@@ -15,34 +18,69 @@ class RedisEventPublisher(
   suspend fun publish(
     channel: String,
     type: String,
-    payload: Map<String, Any>,
-    ttl: Long? = null
-  ) {
-    val streamKey = "${properties.streamKeyPrefix}:$channel"
+    payload: Map<String, Any?>,
+    ttl: Duration? = null
+  ): String {
+    require(ttl == null || ttl.inWholeMilliseconds > 0) { "ttl must be at least 1 millisecond, was $ttl" }
 
-    val body: Map<ByteBuffer, ByteBuffer> =
-      mapOf(
-        bytes(SseKeys.RECORD_FIELD_CHANNEL) to bytes(channel),
-        bytes(SseKeys.RECORD_FIELD_TYPE) to bytes(type),
-        bytes(SseKeys.RECORD_FIELD_PAYLOAD) to bytes(objectMapper.writeValueAsString(payload))
-      )
+    val streamKey = properties.streamKey(channel)
+    val keysAndArgs =
+      listOf(
+        streamKey,
+        ttl?.inWholeMilliseconds?.toString().orEmpty(),
+        properties.maxLength?.toString().orEmpty(),
+        SseKeys.RECORD_FIELD_CHANNEL,
+        channel,
+        SseKeys.RECORD_FIELD_TYPE,
+        type,
+        SseKeys.RECORD_FIELD_PAYLOAD,
+        objectMapper.writeValueAsString(payload)
+      ).map(RedisStreamUtils::toBytes)
 
     val connection = factory.reactiveConnection
-    val streamKeyBytes = bytes(streamKey)
+    try {
+      val result =
+        connection
+          .scriptingCommands()
+          .eval<Any>(
+            PUBLISH_SCRIPT.duplicate(),
+            ReturnType.VALUE,
+            1,
+            *keysAndArgs.toTypedArray()
+          ).next()
+          .awaitSingle()
 
-    connection
-      .streamCommands()
-      .xAdd(streamKeyBytes, body)
-      .map(RecordId::getValue)
-      .awaitSingle()
-
-    if (ttl != null) {
-      connection
-        .keyCommands()
-        .expire(streamKeyBytes, Duration.ofSeconds(ttl))
-        .awaitSingle()
+      return when (result) {
+        is ByteBuffer -> RedisStreamUtils.fromBytes(result)
+        is ByteArray -> String(result, Charsets.UTF_8)
+        else -> result.toString()
+      }
+    } finally {
+      withContext(NonCancellable) { connection.closeLater().awaitSingleOrNull() }
     }
   }
 
-  private fun bytes(value: String): ByteBuffer = RedisStreamUtils.toBytes(value)
+  private companion object {
+    private val PUBLISH_SCRIPT: ByteBuffer =
+      RedisStreamUtils
+        .toBytes(
+          """
+          local args = { KEYS[1] }
+          if ARGV[2] ~= '' then
+            table.insert(args, 'MAXLEN')
+            table.insert(args, '~')
+            table.insert(args, ARGV[2])
+          end
+          table.insert(args, '*')
+          for i = 3, #ARGV do
+            table.insert(args, ARGV[i])
+          end
+          local id = redis.call('XADD', unpack(args))
+          if ARGV[1] ~= '' then
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+          end
+          return id
+          """.trimIndent()
+        ).asReadOnlyBuffer()
+  }
 }

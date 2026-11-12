@@ -8,5 +8,16 @@ data class SseProperties(
   val readCount: Long = 100,
   val blockTimeoutInSeconds: Long = 10,
   val retryInSeconds: Long = 3,
-  val heartbeatIntervalInSeconds: Long = 15
-)
+  val heartbeatIntervalInSeconds: Long = 15,
+  val maxLength: Long? = null
+) {
+  init {
+    require(maxLength == null || maxLength > 0) { "maxLength must be positive, was $maxLength" }
+  }
+
+  fun streamKey(channel: String): String {
+    require(channel.isNotBlank()) { "channel must not be blank" }
+
+    return "$streamKeyPrefix:$channel"
+  }
+}

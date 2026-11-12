@@ -66,6 +66,7 @@ redis-sse:
   block-timeout-in-seconds: 10
   retry-in-seconds: 3
   heartbeat-interval-in-seconds: 15
+  max-length: 10000
 ```
 
 Defaults:
@@ -77,6 +78,7 @@ Defaults:
 | `redis-sse.block-timeout-in-seconds` | `10` | Redis stream blocking read timeout. |
 | `redis-sse.retry-in-seconds` | `3` | SSE client retry duration sent with events. |
 | `redis-sse.heartbeat-interval-in-seconds` | `15` | Interval for heartbeat SSE messages. |
+| `redis-sse.max-length` | _none_ | Approximate maximum number of records kept per channel stream (`XADD MAXLEN ~`). When unset, streams are not trimmed. |
 
 ## Publishing Events
 
@@ -85,6 +87,7 @@ Inject `RedisEventPublisher` and publish a JSON-serializable map:
 ```kotlin
 import io.github.kostack.redis_sse.RedisEventPublisher
 import org.springframework.stereotype.Service
+import kotlin.time.Duration.Companion.hours
 
 @Service
 class OrderEvents(
@@ -95,7 +98,7 @@ class OrderEvents(
       channel = "orders",
       type = "order-created",
       payload = mapOf("orderId" to orderId),
-      ttl = 3600
+      ttl = 1.hours
     )
   }
 }
@@ -107,11 +110,17 @@ The publisher writes one Redis Stream record containing:
 - `type`
 - `payload`
 
-The `payload` field is a JSON string.
+The `payload` field is a JSON string. `publish` returns the Redis record id of the new event.
 
-The optional `ttl` argument sets the Redis stream expiration in seconds. Each publish with a TTL
-refreshes the expiration for the entire channel stream. When `ttl` is omitted or `null`, the
-publisher does not set an expiration.
+The optional `ttl` argument (a `kotlin.time.Duration`, at least 1 millisecond) sets the expiration
+of the entire channel stream. Each publish with a TTL refreshes that expiration. When `ttl` is
+omitted or `null`, the publisher leaves any existing expiration unchanged, so a stream that was
+given a TTL earlier keeps expiring on that schedule. Zero or negative TTLs are rejected.
+
+The record append, the optional `max-length` trim and the optional expiration run atomically in a
+single Lua script, so a stream is never left without its TTL after a partially failed publish.
+
+The channel must not be blank.
 
 ## Subscribing To Events
 
