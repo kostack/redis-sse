@@ -112,33 +112,144 @@ class RedisEventSubscriberTest {
     }
 
   @Test
-  fun `zero replay limit skips replay and reads only new events`() =
+  fun `zero replay limit resumes after the current last stream id`() =
     runTest {
-      val capturedReadCommands = mutableListOf<ReadCommand>()
+      val capturedLimit = mutableListOf<Limit>()
       every { factory.reactiveConnection } returns connection
       every { connection.streamCommands() } returns streamCommands
-      every { streamCommands.read(any<Publisher<ReadCommand>>()) } answers {
-        val command = Flux.from(firstArg<Publisher<ReadCommand>>()).blockFirst()!!
-        capturedReadCommands += command
-
-        Flux.just(
-          CommandResponse(
-            command,
-            Flux.just(record("3-0", SseKeys.FINISHED_EVENT, """{"done":true}"""))
-          )
-        )
-      }
+      every {
+        streamCommands.xRevRange(any<ByteBuffer>(), any<Range<String>>(), capture(capturedLimit))
+      } returns Flux.just(record("2-0", "message", """{}"""))
+      val offsets = stubReads(listOf(record("3-0", SseKeys.FINISHED_EVENT, """{"done":true}""")))
 
       val events = subscriber.subscribe("orders", replayLimit = 0).toList()
-      val streamOffset = capturedReadCommands.single().streamOffsets.single()
 
-      assertThat(events).hasSize(1)
-      assertThat(events.single().id()).isEqualTo("3-0")
-      assertThat(streamOffset.offset.offset).isEqualTo("$")
+      assertThat(events.map { it.id() }).containsExactly("3-0")
+      assertThat(capturedLimit.single().count).isEqualTo(1)
+      assertThat(offsets).containsExactly("2-0")
+    }
+
+  @Test
+  fun `zero replay limit reads from stream start when the stream is empty`() =
+    runTest {
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      every {
+        streamCommands.xRevRange(any<ByteBuffer>(), any<Range<String>>(), any<Limit>())
+      } returns Flux.empty()
+      val offsets = stubReads(listOf(record("1-0", SseKeys.FINISHED_EVENT, """{}""")))
+
+      subscriber.subscribe("orders", replayLimit = 0).toList()
+
+      assertThat(offsets).containsExactly("0-0")
+    }
+
+  @Test
+  fun `continues from the last received id across empty blocking reads`() =
+    runTest {
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      val offsets =
+        stubReads(
+          listOf(record("1-0", "message", """{}""")),
+          emptyList(),
+          listOf(record("2-0", SseKeys.FINISHED_EVENT, """{}"""))
+        )
+
+      val events = subscriber.subscribe("orders").toList()
+
+      assertThat(events.map { it.id() }).containsExactly("1-0", "2-0")
+      assertThat(offsets).containsExactly("0-0", "1-0", "1-0")
+    }
+
+  @Test
+  fun `resumes after last event id and ignores replay limit`() =
+    runTest {
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      val offsets = stubReads(listOf(record("6-0", SseKeys.FINISHED_EVENT, """{}""")))
+
+      val events = subscriber.subscribe("orders", replayLimit = 10, lastEventId = "5-0").toList()
+
+      assertThat(events.map { it.id() }).containsExactly("6-0")
+      assertThat(offsets).containsExactly("5-0")
       verify(exactly = 0) {
         streamCommands.xRevRange(any<ByteBuffer>(), any<Range<String>>(), any<Limit>())
       }
     }
+
+  @Test
+  fun `rejects malformed last event id`() =
+    runTest {
+      val exception =
+        assertFailsWith<IllegalArgumentException> {
+          subscriber.subscribe("orders", lastEventId = "abc").toList()
+        }
+
+      assertThat(exception).hasMessage("lastEventId must be a Redis stream id, was 'abc'")
+    }
+
+  @Test
+  fun `skips malformed records and continues after them`() =
+    runTest {
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      val malformed =
+        StreamRecords
+          .rawBuffer(mapOf(bytes(SseKeys.RECORD_FIELD_TYPE) to bytes("message")))
+          .withId(RecordId.of("1-0"))
+          .withStreamKey(bytes("test:sse-events:orders"))
+      val offsets =
+        stubReads(
+          listOf(malformed),
+          listOf(record("2-0", SseKeys.FINISHED_EVENT, """{}"""))
+        )
+
+      val events = subscriber.subscribe("orders").toList()
+
+      assertThat(events.map { it.id() }).containsExactly("2-0")
+      assertThat(offsets).containsExactly("0-0", "1-0")
+    }
+
+  @Test
+  fun `backs off exponentially after read errors and recovers`() =
+    runTest {
+      every { factory.reactiveConnection } returns connection
+      every { connection.streamCommands() } returns streamCommands
+      var calls = 0
+      val callTimes = mutableListOf<Long>()
+      every { streamCommands.read(any<Publisher<ReadCommand>>()) } answers {
+        val command = Flux.from(firstArg<Publisher<ReadCommand>>()).blockFirst()!!
+        callTimes += testScheduler.currentTime
+        if (calls++ < 2) {
+          Flux.error(IllegalStateException("redis down"))
+        } else {
+          Flux.just(CommandResponse(command, Flux.just(record("1-0", SseKeys.FINISHED_EVENT, "{}"))))
+        }
+      }
+
+      val events = subscriber.subscribe("orders").toList()
+
+      assertThat(events.map { it.id() }).containsExactly("1-0")
+      assertThat(callTimes).containsExactly(0L, 100L, 300L)
+      verify(exactly = 1) { connection.closeLater() }
+    }
+
+  /** Stubs consecutive blocking reads with the given batches and records the requested offsets. */
+  private fun stubReads(vararg batches: List<ByteBufferRecord>): List<String> {
+    val offsets = mutableListOf<String>()
+    var index = 0
+    every { streamCommands.read(any<Publisher<ReadCommand>>()) } answers {
+      val command = Flux.from(firstArg<Publisher<ReadCommand>>()).blockFirst()!!
+      offsets +=
+        command.streamOffsets
+          .single()
+          .offset.offset
+      val batch = batches[index++]
+      Flux.just(CommandResponse(command, Flux.fromIterable(batch)))
+    }
+    return offsets
+  }
 
   @Test
   fun `rejects negative replay limit`() =

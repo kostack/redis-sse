@@ -12,6 +12,7 @@ The package provides the following components when a reactive Redis connection f
 
 - Java 23
 - Spring Boot 4.1
+- Redis 5.0 or newer (Redis Streams)
 - Reactive Redis configured through Spring Boot
 - WebFlux for SSE endpoints
 
@@ -78,7 +79,12 @@ Defaults:
 | `redis-sse.block-timeout-in-seconds` | `10` | Redis stream blocking read timeout. |
 | `redis-sse.retry-in-seconds` | `3` | SSE client retry duration sent with events. |
 | `redis-sse.heartbeat-interval-in-seconds` | `15` | Interval for heartbeat SSE messages. |
-| `redis-sse.max-length` | _none_ | Approximate maximum number of records kept per channel stream (`XADD MAXLEN ~`). When unset, streams are not trimmed. |
+| `redis-sse.max-length` | _none_ | Approximate maximum number of records kept per channel stream (`XADD MAXLEN ~`). When unset, streams are not trimmed. Must be positive. |
+
+`max-length` trimming is approximate: Redis only removes whole internal nodes (100 entries each by
+default), so a stream can hold somewhat more records than configured, and very small values may not
+trim at all until the stream grows past a node. Trimming also applies to events that clients have not
+read yet; see [Resuming after reconnects](#resuming-after-reconnects).
 
 ## Publishing Events
 
@@ -133,6 +139,7 @@ import org.springframework.http.MediaType
 import org.springframework.http.codec.ServerSentEvent
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
@@ -148,9 +155,10 @@ class SseController(
   )
   fun stream(
     @PathVariable channel: String,
-    @RequestParam(required = false) replayLimit: Int?
+    @RequestParam(required = false) replayLimit: Int?,
+    @RequestHeader("Last-Event-ID", required = false) lastEventId: String?
   ): Flow<ServerSentEvent<String>> =
-    subscriber.subscribe(channel, replayLimit)
+    subscriber.subscribe(channel, replayLimit, lastEventId)
 }
 ```
 
@@ -160,9 +168,24 @@ Clients can then connect to:
 GET /sse/orders
 GET /sse/orders?replayLimit=0
 GET /sse/orders?replayLimit=10
+GET /sse/orders            (with header Last-Event-ID: 1700000000000-0)
 ```
 
-`replayLimit` replays the last N messages from the Redis stream before continuing with live messages. Pass `0` to skip fetching previous messages and receive only new stream events. It must be greater than or equal to zero when provided.
+`replayLimit` replays the last N messages from the Redis stream before continuing with live messages. Pass `0` to skip fetching previous messages and receive only new stream events. It must be greater than or equal to zero when provided. When `replayLimit` is omitted, the whole retained stream is replayed.
+
+### Resuming after reconnects
+
+`lastEventId` resumes streaming right after the given event id. Browsers send the id of the last received event in the `Last-Event-ID` header when an `EventSource` reconnects, so passing that header through lets clients continue without gaps or duplicates. When `lastEventId` is set, `replayLimit` is ignored.
+
+`lastEventId` must be a Redis stream id such as `1700000000000-0`; any other value is rejected with `IllegalArgumentException`. Because the value comes from a client header, consider mapping that exception to `400 Bad Request` in your application.
+
+If the events after `lastEventId` were already removed by `max-length` trimming, a TTL expiry or a purge, the client continues from the oldest event still retained, and the removed events are not delivered.
+
+### Connections and errors
+
+Each active subscription holds one dedicated Redis connection for blocking stream reads, which is closed when the client disconnects or the flow ends. The number of Redis connections therefore grows with the number of open SSE clients; keep Redis `maxclients` (10,000 by default) above your expected peak.
+
+If reading from Redis fails, the subscriber logs the error and retries with exponential backoff (100 ms doubling up to 30 s) while heartbeats keep the connection open. Stream records without a `type` or `payload` field are logged and skipped.
 
 ## Purging Events
 
@@ -197,6 +220,18 @@ publisher.publish(
 ```
 
 Heartbeat events are emitted with type `heartbeat` and empty data while the stream remains open.
+
+## Upgrading
+
+Upgrading from versions before atomic publishing:
+
+- `RedisEventPublisher.publish` takes `ttl` as a `kotlin.time.Duration` instead of a number of
+  seconds. Replace `ttl = 3600` with `ttl = 1.hours` (`import kotlin.time.Duration.Companion.hours`).
+- `publish` now returns the Redis record id as a `String`. Existing callers that ignore the result
+  keep compiling.
+- `payload` accepts `Map<String, Any?>`, so null values are allowed.
+- `RedisEventSubscriber.subscribe` has a new optional `lastEventId` parameter. Existing calls keep
+  working.
 
 ## License
 
